@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -H \"User-Agent: test test@test.com\" \"https://www.sec.gov/Archives/edgar/data/1045810/000104581025000021/0001045810-25-000021-index.json\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(doc.get\\(''''name'''',''''''''\\), doc.get\\(''''type'''',''''''''\\)\\) for doc in d.get\\(''''documents'''',[]\\)]\")",
+      "Bash(curl -s -H \"User-Agent: test test@test.com\" \"https://data.sec.gov/submissions/CIK0001045810.json\")",
+      "Bash(curl -s -H \"User-Agent: test test@test.com\" \"https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/0001045810-26-000021-index.json\")",
+      "Bash(curl -v -H \"User-Agent: test test@test.com\" \"https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/0001045810-26-000021-index.json\")",
+      "Bash(curl -s -H \"User-Agent: test test@test.com\" \"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=1045810&type=10-K&dateb=&owner=include&count=1&search_text=&output=atom\")",
+      "Bash(curl -s -H \"User-Agent: test test@test.com\" \"https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/0001045810-26-000021-index.htm\")"
+    ]
+  }
+}

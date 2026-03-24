@@ -1,121 +1,303 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-from agent import build_agent
 
-# Agent is stored here after startup
+from agent import build_agent
+from database import connect_db, close_db, connect_sync_db, close_sync_db, get_db, get_sync_collection
+from models.stock import StockCreate, StockUpdate, StockResponse
+from services.stock_service import StockService
+from services.chat_service import ChatService
+from services import rag_service
+from models.chat import ChatRequest, ChatResponse
+
+# ── Shared app state ──────────────────────────────────────────────────────────
 app_state: dict = {}
 
-# In-memory storage — defined early so lifespan can reference it
-stocks_db = {
-    "AAPL": {"symbol": "AAPL", "price": 150.25, "change": 2.50, "change_percent": 1.69},
-    "GOOGL": {"symbol": "GOOGL", "price": 140.80, "change": -1.20, "change_percent": -0.84},
-}
 
+# ── Lifespan: connect DB + build agent on startup ─────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Build the LlamaIndex agent once at startup and share it across requests."""
+    await connect_db()
+    connect_sync_db()
     try:
-        app_state["agent"] = build_agent(stocks_db)
+        app_state["agent"] = build_agent(get_sync_collection("stocks"))
         print("✅ LlamaIndex agent ready")
     except ValueError as e:
         print(f"⚠️  Agent not started: {e}")
         app_state["agent"] = None
     yield
+    close_sync_db()
+    await close_db()
     app_state.clear()
+
 
 app = FastAPI(
     title="Stocksight API",
-    description="A simple stock market API powered by FastAPI + LlamaIndex",
-    version="2.0.0",
+    description="Stock market API powered by FastAPI + MongoDB + LlamaIndex",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-class Stock(BaseModel):
-    symbol: str
-    price: float
-    change: float
-    change_percent: float
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class StockUpdate(BaseModel):
-    price: float
-    change: float
-    change_percent: float
 
+# ── Dependency helpers ────────────────────────────────────────────────────────
+def get_service() -> StockService:
+    return StockService(get_db())
+
+def get_chat_service() -> ChatService:
+    return ChatService(get_db())
+
+def get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host
+
+
+# ── General ───────────────────────────────────────────────────────────────────
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to Stocksight API", "version": "1.0.0"}
+    return {"message": "Welcome to Stocksight API", "version": "3.0.0"}
 
-@app.get("/stocks")
-def get_all_stocks():
-    """Get all stocks"""
-    return list(stocks_db.values())
-
-@app.get("/stocks/{symbol}")
-def get_stock(symbol: str):
-    """Get a specific stock by symbol"""
-    symbol = symbol.upper()
-    if symbol not in stocks_db:
-        return {"error": f"Stock {symbol} not found"}, 404
-    return stocks_db[symbol]
-
-@app.post("/stocks")
-def create_stock(stock: Stock):
-    """Create a new stock"""
-    if stock.symbol in stocks_db:
-        return {"error": f"Stock {stock.symbol} already exists"}, 400
-    stocks_db[stock.symbol] = stock.dict()
-    return {"message": "Stock created successfully", "stock": stock}
-
-@app.put("/stocks/{symbol}")
-def update_stock(symbol: str, stock_update: StockUpdate):
-    """Update an existing stock"""
-    symbol = symbol.upper()
-    if symbol not in stocks_db:
-        return {"error": f"Stock {symbol} not found"}, 404
-    stocks_db[symbol].update(stock_update.dict())
-    return {"message": "Stock updated successfully", "stock": stocks_db[symbol]}
-
-@app.delete("/stocks/{symbol}")
-def delete_stock(symbol: str):
-    """Delete a stock"""
-    symbol = symbol.upper()
-    if symbol not in stocks_db:
-        return {"error": f"Stock {symbol} not found"}, 404
-    deleted = stocks_db.pop(symbol)
-    return {"message": "Stock deleted successfully", "stock": deleted}
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
     return {"status": "healthy"}
 
 
+# ── Stock CRUD ────────────────────────────────────────────────────────────────
+@app.get("/stocks", response_model=list[StockResponse])
+async def get_all_stocks(
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Max records to return"),
+):
+    """Get all stocks with optional pagination."""
+    return await get_service().get_all(skip=skip, limit=limit)
+
+
+@app.get("/stocks/search", response_model=list[StockResponse])
+async def search_stocks(
+    q: str = Query(..., min_length=1, description="Search by symbol, name or sector"),
+):
+    """Case-insensitive search across symbol, name, and sector."""
+    return await get_service().search(q)
+
+
+@app.get("/stocks/{symbol}", response_model=StockResponse)
+async def get_stock(symbol: str):
+    """Get a specific stock by ticker symbol."""
+    stock = await get_service().get_by_symbol(symbol)
+    if not stock:
+        raise HTTPException(status_code=404, detail=f"Stock '{symbol.upper()}' not found")
+    return stock
+
+
+@app.post("/stocks", response_model=StockResponse, status_code=201)
+async def create_stock(stock: StockCreate):
+    """Create a new stock entry."""
+    existing = await get_service().get_by_symbol(stock.symbol)
+    if existing:
+        raise HTTPException(
+            status_code=409, detail=f"Stock '{stock.symbol.upper()}' already exists"
+        )
+    return await get_service().create(stock)
+
+
+@app.put("/stocks/{symbol}", response_model=StockResponse)
+async def update_stock(symbol: str, payload: StockUpdate):
+    """Partial update — only the fields you provide are changed."""
+    updated = await get_service().update(symbol, payload)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Stock '{symbol.upper()}' not found")
+    return updated
+
+
+@app.delete("/stocks/{symbol}", response_model=StockResponse)
+async def delete_stock(symbol: str):
+    """Permanently delete a stock by symbol."""
+    deleted = await get_service().delete(symbol)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Stock '{symbol.upper()}' not found")
+    return deleted
+
+
+# ── Market analytics ──────────────────────────────────────────────────────────
+@app.get("/market/summary")
+async def market_summary():
+    """High-level summary: total stocks, gainers, losers, flat."""
+    return await get_service().market_summary()
+
+
+@app.get("/market/top-gainer", response_model=StockResponse)
+async def top_gainer():
+    """Stock with the highest percentage gain today."""
+    stock = await get_service().get_top_gainer()
+    if not stock:
+        raise HTTPException(status_code=404, detail="No stocks available")
+    return stock
+
+
+@app.get("/market/top-loser", response_model=StockResponse)
+async def top_loser():
+    """Stock with the biggest percentage loss today."""
+    stock = await get_service().get_top_loser()
+    if not stock:
+        raise HTTPException(status_code=404, detail="No stocks available")
+    return stock
+
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
 class AgentQuery(BaseModel):
     question: str
 
 
 @app.post("/agent/query")
-def agent_query(body: AgentQuery):
+async def agent_query(body: AgentQuery):
     """
     Ask the LlamaIndex agent a natural language question about stocks.
 
     Examples:
-    - "What is the price of AAPL?"
-    - "Which stock is the top gainer today?"
-    - "Give me a market summary"
+      - "What is the price of AAPL?"
+      - "Which stock is the top gainer today?"
+      - "Give me a market summary"
     """
     agent = app_state.get("agent")
     if agent is None:
         raise HTTPException(
             status_code=503,
-            detail="Agent is not available. Check that OPENAI_API_KEY is set in your .env file.",
+            detail="Agent unavailable. Check OPENAI_API_KEY is set in your .env file.",
         )
-    response = agent.chat(body.question)
+    response = await agent.achat(body.question)
     return {"question": body.question, "answer": str(response)}
+
+
+# ── Chat sessions ─────────────────────────────────────────────────────────────
+
+@app.post("/chat/message", response_model=ChatResponse)
+async def chat_message(body: ChatRequest, request: Request):
+    """
+    Send a question, get a RAG-grounded answer, and persist the exchange.
+    Pass session_id to continue an existing session; omit to start a new one.
+    """
+    ip = get_client_ip(request)
+    svc = get_chat_service()
+
+    # Create session on first message; verify it exists if one is provided
+    if not body.session_id:
+        session_id = await svc.create_session(ip, body.question)
+    else:
+        existing = await svc.get_session(body.session_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_id = body.session_id
+
+    # Fetch conversation history for this session
+    history = []
+    if session_id:
+        session = await svc.get_session(session_id)
+        if session:
+            history = [
+                {"role": m["role"], "content": m["content"]}
+                for m in session.get("messages", [])
+            ]
+
+    # Get RAG answer (runs sync in thread pool)
+    import asyncio
+    try:
+        result = await asyncio.to_thread(rag_service.query, body.question, 20, history)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    answer = result["answer"]
+    sources = result.get("sources", [])
+
+    # Persist both turns
+    await svc.append_messages(session_id, body.question, answer)
+
+    return ChatResponse(session_id=session_id, answer=answer, sources=sources)
+
+
+@app.get("/chat/sessions")
+async def list_sessions(request: Request):
+    """Return all chat sessions for the requesting IP, newest first."""
+    ip = get_client_ip(request)
+    return await get_chat_service().get_sessions_by_ip(ip)
+
+
+@app.get("/chat/sessions/{session_id}")
+async def get_session(session_id: str, request: Request):
+    """Return a full session with all messages."""
+    session = await get_chat_service().get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+@app.patch("/chat/sessions/{session_id}/archive")
+async def archive_session(session_id: str):
+    """Soft-delete a session — hides it from the UI without removing data."""
+    archived = await get_chat_service().archive_session(session_id)
+    if not archived:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"archived": session_id}
+
+
+@app.delete("/chat/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request):
+    """Hard-delete a chat session."""
+    deleted = await get_chat_service().delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": session_id}
+
+
+# ── RAG ───────────────────────────────────────────────────────────────────────
+class RagQuery(BaseModel):
+    question: str
+    top_k: int = 20
+
+
+@app.get("/rag/context")
+async def rag_context(
+    q: str = Query(..., description="Question to embed and retrieve context for"),
+    top_k: int = Query(20, ge=1, le=50),
+):
+    """
+    Fetch raw Pinecone chunks for a question without calling OpenAI.
+    Use this to inspect retrieved context and debug relevance.
+    """
+    import asyncio
+    try:
+        return await asyncio.to_thread(rag_service.fetch_context, q, top_k)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/rag/query")
+async def rag_query(body: RagQuery):
+    """
+    Answer a question using SEC filing context retrieved from Pinecone.
+
+    Examples:
+      - "What were NVIDIA's revenue figures in their latest 10-K?"
+      - "What risk factors did Apple mention in their SEC filings?"
+    """
+    try:
+        import asyncio
+        result = await asyncio.to_thread(rag_service.query, body.question, body.top_k)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
