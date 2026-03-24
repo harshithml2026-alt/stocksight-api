@@ -1,4 +1,5 @@
 import os
+import time
 from openai import OpenAI
 from pinecone import Pinecone
 
@@ -146,10 +147,24 @@ def query(
         "content": f"Context from SEC filings:\n\n{context}\n\nQuestion: {question}",
     })
 
+    t0 = time.perf_counter()
     completion = _get_openai().chat.completions.create(model=model, messages=messages)
+    elapsed = time.perf_counter() - t0
+
+    usage = completion.usage
+    completion_tokens = usage.completion_tokens if usage else 0
+    total_tokens = usage.total_tokens if usage else 0
+    tokens_per_sec = round(completion_tokens / elapsed, 2) if elapsed > 0 else 0
 
     return {
         "question": question,
         "answer": completion.choices[0].message.content,
         "sources": sources,
+        "metrics": {
+            "total_tokens": total_tokens,
+            "prompt_tokens": usage.prompt_tokens if usage else 0,
+            "completion_tokens": completion_tokens,
+            "inference_time_sec": round(elapsed, 3),
+            "tokens_per_sec": tokens_per_sec,
+        },
     }

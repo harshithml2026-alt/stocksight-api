@@ -50,10 +50,14 @@ class ChatService:
         session_id: str,
         user_text: str,
         assistant_text: str,
+        metrics: dict | None = None,
     ) -> None:
         """Append a user + assistant message pair to an existing session."""
         now = datetime.now(timezone.utc).isoformat()
         now_ms = _now_ms()
+        assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": now}
+        if metrics:
+            assistant_msg["metrics"] = metrics
         await self.col.update_one(
             {"session_id": session_id},
             {
@@ -61,7 +65,7 @@ class ChatService:
                     "messages": {
                         "$each": [
                             {"role": "user", "content": user_text, "timestamp": now},
-                            {"role": "assistant", "content": assistant_text, "timestamp": now},
+                            assistant_msg,
                         ]
                     }
                 },

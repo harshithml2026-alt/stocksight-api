@@ -217,11 +217,12 @@ async def chat_message(body: ChatRequest, request: Request):
 
     answer = result["answer"]
     sources = result.get("sources", [])
+    metrics = result.get("metrics")
 
     # Persist both turns
-    await svc.append_messages(session_id, body.question, answer)
+    await svc.append_messages(session_id, body.question, answer, metrics)
 
-    return ChatResponse(session_id=session_id, answer=answer, sources=sources)
+    return ChatResponse(session_id=session_id, answer=answer, sources=sources, metrics=metrics)
 
 
 @app.get("/chat/sessions")

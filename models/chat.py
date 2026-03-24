@@ -31,7 +31,16 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class Metrics(BaseModel):
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+    inference_time_sec: float
+    tokens_per_sec: float
+
+
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
     sources: list[dict] = []
+    metrics: Optional[Metrics] = None
