@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: stocksight-api
+    runtime: docker
+    plan: free
+    envVars:
+      - key: MONGODB_URL
+        sync: false
+      - key: DATABASE_NAME
+        value: stocksightDB
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: stocksight-data-ingestion
+      - key: ALLOWED_ORIGINS
+        sync: false
