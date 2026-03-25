@@ -51,6 +51,7 @@ class ChatService:
         user_text: str,
         assistant_text: str,
         metrics: dict | None = None,
+        sources: list | None = None,
     ) -> None:
         """Append a user + assistant message pair to an existing session."""
         now = datetime.now(timezone.utc).isoformat()
@@ -58,6 +59,22 @@ class ChatService:
         assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": now}
         if metrics:
             assistant_msg["metrics"] = metrics
+        if sources:
+            # Deduplicate by filing identity, keep top 5 unique filings
+            seen, deduped = set(), []
+            for s in sources:
+                meta = s.get("metadata", {})
+                key = (
+                    meta.get("ticker") or meta.get("company", ""),
+                    meta.get("filing_type") or meta.get("form_type", ""),
+                    meta.get("period_of_report") or meta.get("date", ""),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(s)
+                if len(deduped) == 5:
+                    break
+            assistant_msg["sources"] = deduped
         await self.col.update_one(
             {"session_id": session_id},
             {

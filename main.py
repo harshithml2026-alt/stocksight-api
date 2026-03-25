@@ -227,7 +227,7 @@ async def chat_message(body: ChatRequest, request: Request):
     metrics = result.get("metrics")
 
     # Persist both turns
-    await svc.append_messages(session_id, body.question, answer, metrics)
+    await svc.append_messages(session_id, body.question, answer, metrics, sources)
 
     return ChatResponse(session_id=session_id, answer=answer, sources=sources, metrics=metrics)
 
