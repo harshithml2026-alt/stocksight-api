@@ -35,9 +35,14 @@ class AdminService:
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self.col = db["chat_sessions"]
 
-    async def get_ips_paginated(self, page: int, page_size: int) -> dict:
+    async def get_ips_paginated(
+        self, page: int, page_size: int,
+        sort_by: str = "last_active", sort_dir: str = "desc"
+    ) -> dict:
         """Group all sessions by IP address with counts and activity timestamps."""
         skip = (page - 1) * page_size
+        sort_field = sort_by if sort_by in ("session_count", "first_seen", "last_active") else "last_active"
+        sort_order = -1 if sort_dir == "desc" else 1
 
         pipeline = [
             {
@@ -48,7 +53,7 @@ class AdminService:
                     "first_seen": {"$min": "$created_at_ms"},
                 }
             },
-            {"$sort": {"last_active": -1}},
+            {"$sort": {sort_field: sort_order}},
             {"$facet": {
                 "items": [{"$skip": skip}, {"$limit": page_size}],
                 "total": [{"$count": "count"}],

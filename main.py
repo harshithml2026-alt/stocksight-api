@@ -278,9 +278,11 @@ async def admin_stats():
 async def admin_list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    sort_by: str = Query("last_active", pattern="^(session_count|first_seen|last_active)$"),
+    sort_dir: str = Query("desc", pattern="^(asc|desc)$"),
 ):
     """Paginated list of all unique IPs with their session counts and activity."""
-    return await get_admin_service().get_ips_paginated(page, page_size)
+    return await get_admin_service().get_ips_paginated(page, page_size, sort_by, sort_dir)
 
 
 @app.post("/admin/ip-locations")
