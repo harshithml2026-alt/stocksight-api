@@ -8,6 +8,7 @@ from database import connect_db, close_db, connect_sync_db, close_sync_db, get_d
 from models.stock import StockCreate, StockUpdate, StockResponse
 from services.stock_service import StockService
 from services.chat_service import ChatService
+from services.admin_service import AdminService, lookup_ip_locations
 from services import rag_service
 from models.chat import ChatRequest, ChatResponse
 
@@ -56,6 +57,9 @@ def get_service() -> StockService:
 
 def get_chat_service() -> ChatService:
     return ChatService(get_db())
+
+def get_admin_service() -> AdminService:
+    return AdminService(get_db())
 
 def get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
@@ -260,6 +264,39 @@ async def delete_session(session_id: str, request: Request):
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"deleted": session_id}
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/stats")
+async def admin_stats():
+    """Overall session stats for the admin dashboard header."""
+    return await get_admin_service().get_stats()
+
+
+@app.get("/admin/sessions")
+async def admin_list_sessions(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Paginated list of all unique IPs with their session counts and activity."""
+    return await get_admin_service().get_ips_paginated(page, page_size)
+
+
+@app.post("/admin/ip-locations")
+async def admin_ip_locations(ips: list[str]):
+    """Batch-resolve IP addresses to city/country using ip-api.com."""
+    return await lookup_ip_locations(ips)
+
+
+@app.get("/admin/sessions/by-ip")
+async def admin_sessions_by_ip(
+    ip: str = Query(..., description="IP address to filter by"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+):
+    """Paginated sessions for a specific IP address."""
+    return await get_admin_service().get_sessions_for_ip(ip, page, page_size)
 
 
 # ── RAG ───────────────────────────────────────────────────────────────────────
