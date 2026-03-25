@@ -2,12 +2,17 @@ import os
 import time
 from openai import OpenAI
 from pinecone import Pinecone
+from services.guardrails import check_input, check_output
+from data.instructions import SYSTEM_PROMPT_RAG, SYSTEM_PROMPT_DIRECT
 
 _openai: OpenAI = None
 _index = None
 
 EMBED_MODEL = "text-embedding-3-small"
 TOP_K = 20
+
+# Tickers that have embeddings in Pinecone
+SUPPORTED_TICKERS = {"NVDA", "MSFT"}
 
 
 def _get_openai() -> OpenAI:
@@ -74,37 +79,174 @@ def fetch_context(question: str, top_k: int = TOP_K) -> dict:
     }
 
 
+def _classify_question(
+    question: str, history: list[dict] | None = None
+) -> tuple[str, str | None]:
+    """
+    Single LLM call that classifies the question, extracts the ticker, and
+    extracts an explicit year if mentioned. Includes the last few conversation
+    turns so follow-up questions resolve correctly.
+
+    Returns a tuple (route, year) where:
+      route — one of: "NONE", "NVDA", "MSFT", "UNKNOWN"
+      year  — 4-digit string (e.g. "2025") or None if not mentioned
+
+    Output format from the LLM: "TICKER:YEAR" or just "TICKER".
+    Examples: "NVDA:2025", "MSFT:2023", "NVDA", "NONE", "UNKNOWN"
+    """
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    supported = ", ".join(sorted(SUPPORTED_TICKERS))
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a router for a financial assistant. "
+                "Identify whether the user's latest question (considering the conversation history) "
+                "is about a specific stock or company, and if so, which ticker it maps to "
+                f"from this supported list: {supported}. "
+                "Also extract the year if the user mentions a specific year.\n\n"
+                "Reply with exactly one token in this format (no other text):\n"
+                "- NONE              — question is not about any specific company or stock\n"
+                "- UNKNOWN           — question is about a company/stock NOT in the supported list\n"
+                "- NVDA              — about NVIDIA, no specific year mentioned\n"
+                "- MSFT              — about Microsoft, no specific year mentioned\n"
+                "- NVDA:2025         — about NVIDIA, year 2025 mentioned\n"
+                "- MSFT:2024         — about Microsoft, year 2024 mentioned\n"
+                "(Replace year with the actual year from the question)"
+            ),
+        }
+    ]
+
+    # Include last 4 turns (2 exchanges) so follow-up questions resolve correctly
+    for turn in (history or [])[-4:]:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+
+    messages.append({"role": "user", "content": question})
+
+    completion = _get_openai().chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=10,
+        temperature=0,
+    )
+    raw = completion.choices[0].message.content.strip().upper()
+
+    # Parse "TICKER:YEAR" or "TICKER"
+    parts = raw.split(":")
+    route = parts[0].strip()
+    year = parts[1].strip() if len(parts) == 2 and parts[1].strip().isdigit() else None
+
+    if route not in SUPPORTED_TICKERS and route not in ("NONE", "UNKNOWN"):
+        route = "NONE"
+
+    return route, year
+
+
+def _query_llm_direct(
+    question: str,
+    history: list[dict] | None = None,
+) -> dict:
+    """Call the LLM directly without Pinecone context (for non-stock questions)."""
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_DIRECT}]
+    for turn in (history or []):
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": question})
+
+    t0 = time.perf_counter()
+    completion = _get_openai().chat.completions.create(model=model, messages=messages)
+    elapsed = time.perf_counter() - t0
+
+    usage = completion.usage
+    completion_tokens = usage.completion_tokens if usage else 0
+    total_tokens = usage.total_tokens if usage else 0
+    tokens_per_sec = round(completion_tokens / elapsed, 2) if elapsed > 0 else 0
+
+    _, safe_answer = check_output(completion.choices[0].message.content)
+    return {
+        "question": question,
+        "answer": safe_answer,
+        "sources": [],
+        "metrics": {
+            "total_tokens": total_tokens,
+            "prompt_tokens": usage.prompt_tokens if usage else 0,
+            "completion_tokens": completion_tokens,
+            "inference_time_sec": round(elapsed, 3),
+            "tokens_per_sec": tokens_per_sec,
+        },
+    }
+
+
 def query(
     question: str,
     top_k: int = TOP_K,
     history: list[dict] | None = None,
 ) -> dict:
     """
-    Embed the question, retrieve top-k chunks from Pinecone,
-    then generate an answer with OpenAI using the retrieved context
-    and the full session conversation history.
+    Route the question:
+      - Not stock-related  → call LLM directly (no Pinecone)
+      - Known ticker       → query Pinecone filtered to that ticker, then call LLM
+      - Unknown ticker     → tell user we only have NVDA and MSFT data
 
     Args:
         question: The current user question.
-        top_k: Number of Pinecone chunks to retrieve.
+        top_k: Number of Pinecone chunks to retrieve (only used for supported tickers).
         history: Prior messages as [{"role": "user"|"assistant", "content": "..."}].
     """
-    # 1. Embed query
-    query_vector = _embed(question)
+    # 1. Guardrail — check input for injection and harmful content
+    is_safe, block_reason = check_input(question)
+    if not is_safe:
+        return {"question": question, "answer": block_reason, "sources": []}
 
-    # 2. Fetch relevant chunks from Pinecone
-    index = _get_index()
-    results = index.query(vector=query_vector, top_k=top_k, include_metadata=True)
+    # 2. Classify question, extract ticker and year in one LLM call
+    route, year = _classify_question(question, history)
 
-    matches = results.get("matches", [])
-    if not matches:
+    if route == "NONE":
+        return _query_llm_direct(question, history)
+
+    if route == "UNKNOWN":
+        supported = " and ".join(sorted(SUPPORTED_TICKERS))
         return {
             "question": question,
-            "answer": "No relevant context found in the SEC filings index.",
+            "answer": (
+                f"I currently only have SEC filing data for {supported}. "
+                "Support for more tickers is coming soon! "
+                "In the meantime, feel free to ask about those companies or ask a general financial question."
+            ),
             "sources": [],
         }
 
-    # 3. Build context string and source list
+    # route is a supported ticker (e.g. "NVDA" or "MSFT")
+    ticker = route
+
+    # 3. Embed query
+    query_vector = _embed(question)
+
+    # 4. Fetch relevant chunks from Pinecone — filtered to ticker and year (if specified)
+    pinecone_filter: dict = {"ticker": {"$eq": ticker}}
+    if year:
+        pinecone_filter["year"] = {"$eq": year}
+
+    index = _get_index()
+    results = index.query(
+        vector=query_vector,
+        top_k=top_k,
+        include_metadata=True,
+        filter=pinecone_filter,
+    )
+
+    matches = results.get("matches", [])
+    if not matches:
+        scope = f"{ticker} ({year})" if year else ticker
+        return {
+            "question": question,
+            "answer": f"No relevant context found in the SEC filings index for {scope}.",
+            "sources": [],
+        }
+
+    # 4. Build context string and source list
     context_parts = []
     sources = []
     for match in matches:
@@ -121,21 +263,10 @@ def query(
 
     context = "\n\n---\n\n".join(context_parts)
 
-    # 4. Build message list: system → history → current question with context
+    # 5. Build message list: system → history → current question with context
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a financial analyst assistant. "
-                "Answer the user's question using the SEC filing context provided "
-                "and the conversation history. "
-                "Be precise and cite specific details from the context. "
-                "If the context does not contain enough information, say so clearly."
-            ),
-        }
-    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
 
     # Append prior turns so the model has full conversation context
     for turn in (history or []):
@@ -156,9 +287,10 @@ def query(
     total_tokens = usage.total_tokens if usage else 0
     tokens_per_sec = round(completion_tokens / elapsed, 2) if elapsed > 0 else 0
 
+    _, safe_answer = check_output(completion.choices[0].message.content)
     return {
         "question": question,
-        "answer": completion.choices[0].message.content,
+        "answer": safe_answer,
         "sources": sources,
         "metrics": {
             "total_tokens": total_tokens,
