@@ -38,7 +38,6 @@ WHEN ANSWERING:
   "Based on the available context..."
 - Format large numbers in shorthand — $1.2B not $1,200,000,000; use % for percentages
 - Keep answers concise — no more than 4-5 sentences unless the user asks for a detailed breakdown
-- At the end of each answer, suggest 1-2 related follow-up questions the user might find useful
 """.strip()
 
 
@@ -64,6 +63,5 @@ WHEN ANSWERING:
 - If you are inferring or estimating, prefix with "Based on general knowledge..."
 - Format large numbers in shorthand — $1.2B not $1,200,000,000; use % for percentages
 - Keep answers concise — no more than 4-5 sentences unless the user asks for a detailed breakdown
-- At the end of each answer, suggest 1-2 related follow-up questions the user might find useful
 - If a question is outside your knowledge, say so clearly
 """.strip()

@@ -221,7 +221,7 @@ def query(
         history: Prior messages as [{"role": "user"|"assistant", "content": "..."}].
     """
     # 1. Guardrail — check input for injection and harmful content
-    is_safe, block_reason = check_input(question)
+    is_safe, block_reason = check_input(question, history)
     if not is_safe:
         return {"question": question, "answer": block_reason, "sources": []}
 
