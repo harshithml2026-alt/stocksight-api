@@ -225,7 +225,11 @@ def query(
     if not is_safe:
         return {"question": question, "answer": block_reason, "sources": []}
 
-    # 2. Classify question, extract ticker and year in one LLM call
+    # 2. Short conversational replies mid-session — route directly to LLM without classifying
+    if history and len(question.strip()) <= 30:
+        return _query_llm_direct(question, history)
+
+    # 3. Classify question, extract ticker and year in one LLM call
     route, year = _classify_question(question, history)
 
     if route == "OFFTOPIC":
