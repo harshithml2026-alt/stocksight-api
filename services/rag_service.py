@@ -135,7 +135,13 @@ def _classify_question(
     # Parse "TICKER:YEAR" or "TICKER"
     parts = raw.split(":")
     route = parts[0].strip()
-    year = parts[1].strip() if len(parts) == 2 and parts[1].strip().isdigit() else None
+
+    # Normalize year — strip non-numeric prefix (e.g. "FY2024" → "2024")
+    year = None
+    if len(parts) == 2:
+        import re as _re
+        year_match = _re.search(r"\d{4}", parts[1])
+        year = year_match.group() if year_match else None
 
     if route not in SUPPORTED_TICKERS and route not in ("NONE", "UNKNOWN"):
         route = "NONE"
@@ -245,6 +251,17 @@ def query(
             "answer": f"No relevant context found in the SEC filings index for {scope}.",
             "sources": [],
         }
+
+    # If no year was specified, keep only chunks from the most recent year present
+    # to avoid mixing data across multiple years in the same answer
+    if not year:
+        years_present = sorted(
+            {m.get("metadata", {}).get("year") for m in matches if m.get("metadata", {}).get("year")},
+            reverse=True,
+        )
+        if years_present:
+            most_recent = years_present[0]
+            matches = [m for m in matches if m.get("metadata", {}).get("year") == most_recent]
 
     # 4. Build context string and source list
     context_parts = []
