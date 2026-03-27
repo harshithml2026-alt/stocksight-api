@@ -3,7 +3,7 @@ import time
 from openai import OpenAI
 from pinecone import Pinecone
 from services.guardrails import check_input, check_output
-from data.instructions import SYSTEM_PROMPT_RAG, SYSTEM_PROMPT_DIRECT
+from data.instructions import SYSTEM_PROMPT_RAG, SYSTEM_PROMPT_DIRECT, _today
 
 _openai: OpenAI = None
 _index = None
@@ -150,7 +150,7 @@ def _query_llm_direct(
     """Call the LLM directly without Pinecone context (for non-stock questions)."""
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_DIRECT}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_DIRECT.format(today=_today())}]
     for turn in (history or []):
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": question})
@@ -266,7 +266,7 @@ def query(
     # 5. Build message list: system → history → current question with context
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_RAG.format(today=_today())}]
 
     # Append prior turns so the model has full conversation context
     for turn in (history or []):
