@@ -110,8 +110,10 @@ def _classify_question(
                 "Resolve all relative time references to absolute years.\n\n"
                 "You are a router. Be lenient with minor spelling mistakes or typos in company names "
                 "and tickers (e.g. 'Nvdia' → NVDA, 'Amazn' → AMZN, 'Microsft' → MSFT, 'APPL' → AAPL).\n"
+                "If the latest message is a short reaction or acknowledgement (e.g. 'wow', 'ok', 'nice', "
+                "'interesting', 'really?') and the prior conversation was about finance, reply GENERAL.\n"
                 "Given a question, reply with ONLY one of these tokens — nothing else:\n"
-                "  OFFTOPIC  — not about finance, stocks, markets, or any company\n"
+                "  OFFTOPIC  — not about finance, stocks, markets, or any company (only for clearly unrelated new questions, NOT for reactions mid-conversation)\n"
                 "  GENERAL   — general finance/economics, no specific company\n"
                 "  UNKNOWN   — about a company NOT in this list: AAPL, GOOGL, AMZN, META, TSLA, MSFT, NVDA\n"
                 "  <TICKER>        — e.g. NVDA, MSFT, META (no year)\n"
@@ -225,11 +227,7 @@ def query(
     if not is_safe:
         return {"question": question, "answer": block_reason, "sources": []}
 
-    # 2. Short conversational replies mid-session — route directly to LLM without classifying
-    if history and len(question.strip()) <= 30:
-        return _query_llm_direct(question, history)
-
-    # 3. Classify question, extract ticker and year in one LLM call
+    # 2. Classify question, extract ticker and year in one LLM call
     route, year = _classify_question(question, history)
 
     if route == "OFFTOPIC":
