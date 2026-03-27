@@ -4,6 +4,7 @@ from openai import OpenAI
 from pinecone import Pinecone
 from services.guardrails import check_input, check_output
 from data.instructions import SYSTEM_PROMPT_RAG, SYSTEM_PROMPT_DIRECT, _today
+from data.off_topic_responses import get_off_topic_response
 
 _openai: OpenAI = None
 _index = None
@@ -12,7 +13,7 @@ EMBED_MODEL = "text-embedding-3-small"
 TOP_K = 20
 
 # Tickers that have embeddings in Pinecone
-SUPPORTED_TICKERS = {"NVDA", "MSFT"}
+SUPPORTED_TICKERS = {"AAPL", "GOOGL", "AMZN", "META", "TSLA", "MSFT", "NVDA"}
 
 
 def _get_openai() -> OpenAI:
@@ -96,24 +97,40 @@ def _classify_question(
     """
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     supported = ", ".join(sorted(SUPPORTED_TICKERS))
+    from datetime import date as _date
+    current_year = _date.today().year
+    last_year = current_year - 1
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a router for a financial assistant. "
-                "Identify whether the user's latest question (considering the conversation history) "
-                "is about a specific stock or company, and if so, which ticker it maps to "
-                f"from this supported list: {supported}. "
-                "Also extract the year if the user mentions a specific year.\n\n"
-                "Reply with exactly one token in this format (no other text):\n"
-                "- NONE              — question is not about any specific company or stock\n"
-                "- UNKNOWN           — question is about a company/stock NOT in the supported list\n"
-                "- NVDA              — about NVIDIA, no specific year mentioned\n"
-                "- MSFT              — about Microsoft, no specific year mentioned\n"
-                "- NVDA:2025         — about NVIDIA, year 2025 mentioned\n"
-                "- MSFT:2024         — about Microsoft, year 2024 mentioned\n"
-                "(Replace year with the actual year from the question)"
+                f"Today is {_date.today().strftime('%B %d, %Y')}. "
+                f"'Last year' = {last_year}. 'This year' = {current_year}. "
+                "Resolve all relative time references to absolute years.\n\n"
+                "You are a router. Given a question, reply with ONLY one of these tokens — nothing else:\n"
+                "  OFFTOPIC  — not about finance, stocks, markets, or any company\n"
+                "  GENERAL   — general finance/economics, no specific company\n"
+                "  UNKNOWN   — about a company NOT in this list: AAPL, GOOGL, AMZN, META, TSLA, MSFT, NVDA\n"
+                "  <TICKER>        — e.g. NVDA, MSFT, META (no year)\n"
+                "  <TICKER>:<YEAR> — e.g. NVDA:2024, META:2025 (year mentioned or resolved)\n\n"
+                "Company name → ticker mapping:\n"
+                "  Apple, Apple Inc. → AAPL\n"
+                "  Google, Alphabet, Alphabet Inc. → GOOGL\n"
+                "  Amazon, Amazon.com → AMZN\n"
+                "  Meta, Meta Platforms, Facebook → META\n"
+                "  Tesla, Tesla Inc. → TSLA\n"
+                "  Microsoft → MSFT\n"
+                "  NVIDIA, Nvidia → NVDA\n\n"
+                "Examples:\n"
+                "  'What is a P/E ratio?' → GENERAL\n"
+                "  'How do I cook pasta?' → OFFTOPIC\n"
+                "  'What is Apple revenue?' → AAPL\n"
+                "  'How much did Meta spend on buybacks?' → META\n"
+                "  'What did Google earn in 2023?' → GOOGL:2023\n"
+                f"  'What did NVIDIA spend on R&D last year?' → NVDA:{last_year}\n"
+                "  'How is Tesla doing this year?' → TSLA:{current_year}\n"
+                "  'What did Netflix earn?' → UNKNOWN"
             ),
         }
     ]
@@ -143,8 +160,8 @@ def _classify_question(
         year_match = _re.search(r"\d{4}", parts[1])
         year = year_match.group() if year_match else None
 
-    if route not in SUPPORTED_TICKERS and route not in ("NONE", "UNKNOWN"):
-        route = "NONE"
+    if route not in SUPPORTED_TICKERS and route not in ("GENERAL", "OFFTOPIC", "UNKNOWN"):
+        route = "OFFTOPIC"
 
     return route, year
 
@@ -209,15 +226,18 @@ def query(
     # 2. Classify question, extract ticker and year in one LLM call
     route, year = _classify_question(question, history)
 
-    if route == "NONE":
+    if route == "OFFTOPIC":
+        return {"question": question, "answer": get_off_topic_response(), "sources": []}
+
+    if route == "GENERAL":
         return _query_llm_direct(question, history)
 
     if route == "UNKNOWN":
-        supported = " and ".join(sorted(SUPPORTED_TICKERS))
+        supported_list = "AAPL (Apple), GOOGL (Alphabet), AMZN (Amazon), META (Meta), TSLA (Tesla), MSFT (Microsoft), NVDA (NVIDIA)"
         return {
             "question": question,
             "answer": (
-                f"I currently only have SEC filing data for {supported}. "
+                f"I currently only have SEC filing data for: {supported_list}. "
                 "Support for more tickers is coming soon! "
                 "In the meantime, feel free to ask about those companies or ask a general financial question."
             ),

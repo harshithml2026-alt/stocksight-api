@@ -61,9 +61,10 @@ def check_input(text: str) -> tuple[bool, str]:
     """
     Validate user input before processing.
 
-    Runs two checks in order:
+    Runs three checks in order:
       1. Prompt injection — regex scan for override/jailbreak patterns
       2. Harmful content  — OpenAI Moderation API
+      3. Finance relevance — LLM binary check (max_tokens=1)
 
     Returns:
         (True, "")           — input is safe, proceed
@@ -74,21 +75,51 @@ def check_input(text: str) -> tuple[bool, str]:
         return False, "Your message contains content that cannot be processed. Please rephrase your question."
 
     # 2. Harmful content check via OpenAI Moderation API (free endpoint)
-    try:
-        result = _get_openai().moderations.create(input=text)
-        outcome = result.results[0]
-        if outcome.flagged:
-            flagged_categories = [
-                cat for cat, flagged in outcome.categories.model_dump().items() if flagged
-            ]
-            return False, (
-                "Your message was flagged for inappropriate content "
-                f"({', '.join(flagged_categories).replace('/', ' / ')}). "
-                "Please keep questions relevant to financial topics."
-            )
-    except Exception:
-        # If moderation API is unavailable, fail open (don't block the user)
-        pass
+    result = _get_openai().moderations.create(input=text)
+    outcome = result.results[0]
+    if outcome.flagged:
+        flagged_categories = [
+            cat for cat, flagged in outcome.categories.model_dump().items() if flagged
+        ]
+        return False, (
+            "Your message was flagged for inappropriate content "
+            f"({', '.join(flagged_categories).replace('/', ' / ')}). "
+            "Please keep questions relevant to financial topics."
+        )
+
+    # 3. Finance relevance check — block non-finance questions before any routing
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    completion = _get_openai().chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a topic classifier for a financial assistant. "
+                    "Your job is to classify the TOPIC of the question only — not whether you can answer it. "
+                    "Reply YES if the question topic is related to finance, stocks, markets, "
+                    "economics, investing, SEC filings, earnings, or any of these companies:\n"
+                    "  Apple (AAPL), Alphabet / Google (GOOGL), Amazon (AMZN), "
+                    "Meta / Facebook (META), Tesla (TSLA), Microsoft (MSFT), NVIDIA (NVDA).\n"
+                    "Reply NO for everything else (cooking, sports, weather, coding, "
+                    "general knowledge, personal advice, etc.).\n"
+                    "Examples:\n"
+                    "  'How is Nvidia doing in 2026?' → YES\n"
+                    "  'What did Meta spend on buybacks?' → YES\n"
+                    "  'How does Amazon price its cloud services?' → YES\n"
+                    "  'How do I cook pasta?' → NO\n"
+                    "  'What is the weather today?' → NO"
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        max_tokens=3,
+        temperature=0,
+    )
+    answer = completion.choices[0].message.content.strip().upper()
+    if not answer.startswith("YES"):
+        from data.off_topic_responses import get_off_topic_response
+        return False, get_off_topic_response()
 
     return True, ""
 
