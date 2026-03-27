@@ -99,7 +99,7 @@ def check_input(text: str, history: list[dict] | None = None) -> tuple[bool, str
         "oh", "ah", "hmm", "huh", "whoa", "damn", "crazy", "noted", "understood",
         "makes sense", "fair enough", "that's interesting", "i understand",
     }
-    if history and (text.strip().lower() in _SHORT_REPLIES or len(text.strip()) <= 30):
+    if text.strip().lower() in _SHORT_REPLIES or len(text.strip()) <= 30:
         return True, ""
 
     # Include last 4 turns so follow-up questions are evaluated in context
